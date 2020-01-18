@@ -3,9 +3,9 @@ package de.sirati97.minherit.test;
 public class Parent extends Base {
 
 
-    public Parent(String s) {
+    public Parent(String s, int num) {
         super(s);
-        System.out.println("Parent<ctor>" + s);
+        System.out.println("Parent<ctor> s=" + s + " and num=" + num);
     }
 
     @Override

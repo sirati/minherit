@@ -1,17 +1,18 @@
 package de.sirati97.minherit;
 
-import com.sun.xml.internal.ws.wsdl.writer.document.ParamType;
 import org.objectweb.asm.*;
 import org.objectweb.asm.tree.*;
-import org.objectweb.asm.util.ASMifier;
-import org.objectweb.asm.util.Printer;
 import org.objectweb.asm.util.TraceClassVisitor;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.lang.invoke.MethodHandles;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 import static org.objectweb.asm.ClassReader.*;
@@ -20,6 +21,12 @@ import static org.objectweb.asm.Opcodes.*;
 import static org.objectweb.asm.Type.*;
 
 public class Processor {
+    private final static Map<Class<?>, Supplier<IMapper>[]> mapperSuppliers = new HashMap<>();
+
+    public static Supplier<IMapper>[] getMapperSupplier(Class<?> clazz) {
+        System.out.println("access private for clazz: " + clazz.getName());
+        return mapperSuppliers.remove(clazz);
+    }
 
     @SuppressWarnings("unchecked")
     public static  <TResult extends TBase, TInterface, TBase, TParent extends TBase, TRefImpl extends TInterface>
@@ -43,29 +50,45 @@ public class Processor {
             result.name = name;
 
             MethodNode ctor = null;
-            MethodInsnNode ctorSuperCall = null;
+            MethodNode clinit = null;
+            MethodNode ctorNewSuper = null;
+
+            for (MethodNode method:parentCN.methods) {
+
+                if ("<init>".equals(method.name)) {
+                    ctorNewSuper = method;
+                }
+            }
             for (MethodNode method:result.methods) {
                 if ("<init>".equals(method.name)) {
                     ctor = method;
+                } else if ("<clinit>".equals(method.name)) {
+                    clinit = method;
                 }
                 Iterable<AbstractInsnNode> iterable = method.instructions::iterator;
                 for (AbstractInsnNode inst:iterable) {
-                    if (inst instanceof MethodInsnNode) {
-                        if (oldSuperName.equals(((MethodInsnNode) inst).owner)) {
-                            ((MethodInsnNode) inst).owner = result.superName;
-                            if (method == ctor) {
-                                ctorSuperCall = (MethodInsnNode) inst;
-                            }
-                        }
-                        if (oldName.equals(((MethodInsnNode) inst).owner)) {
-                            ((MethodInsnNode) inst).owner = result.name;
-                        }
-                    }
+                    remapThisSuper(inst, oldSuperName, oldName, result.superName, result.name);
                 }
             }
-            Consumer<Class<?>> fieldInit = (c)->{};
-            fieldInit = fieldInit.andThen(ctorMapper(Type.getArgumentTypes(ctor.desc), Type.getArgumentTypes(ctorSuperCall.desc), 0, mapperSupplier, result, ctor));
+            for(InnerClassNode innerClassNode: result.innerClasses) {
+                /*for (MethodNode method:innerClassNode.methods) {
+                    Iterable<AbstractInsnNode> iterable = method.instructions::iterator;
+                    for (AbstractInsnNode inst:iterable) {
+                        remapThisSuper(inst, oldSuperName, oldName, result.superName, result.name);
+                    }
+                }*/
+            }
+            if (clinit == null) {
+                clinit = new MethodNode(ACC_STATIC, "<clinit>", "()V", null, null);
+                setLineNumber(clinit, Integer.MAX_VALUE);
+                clinit.visitInsn(RETURN);
+                clinit.visitEnd();
+                result.methods.add(clinit);
+            }
 
+            //Consumer<Class<?>> fieldInit = (c)->{};
+            //fieldInit = fieldInit.andThen(
+            ctorMapper(Type.getArgumentTypes(ctor.desc), Type.getArgumentTypes(ctorNewSuper.desc), 0, mapperSupplier, result, ctor, clinit);//)
 
 
             ClassWriter cw = new ClassWriter(COMPUTE_FRAMES);
@@ -74,24 +97,46 @@ public class Processor {
 
             /*TraceClassVisitor pcv = new TraceClassVisitor(new PrintWriter(System.out));
             ClassReader cr = new ClassReader(b, 0, b.length);
-            cr.accept(pcv, EXPAND_FRAMES);*/
+            cr.accept(pcv, EXPAND_FRAMES);/**/
 
-            Class<TResult> resultClass = (Class<TResult>)  loadClass(b);
-            fieldInit.accept(resultClass);
+            Class<TResult> resultClass = (Class<TResult>)  loadClass(b, result.name.replace('/','.'), implClass.getClassLoader());
+            mapperSuppliers.put(resultClass, new Supplier[]{mapperSupplier});
+            //fieldInit.accept(resultClass);
             return resultClass;
-        } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
+        } catch (ClassNotFoundException | NoSuchMethodException | InvocationTargetException | IllegalAccessException e) {
             throw new IllegalStateException(e);
+        }
+    }
+
+    private static void remapThisSuper(AbstractInsnNode inst, String oldSuperName, String oldName, String superName, String name) {
+        if (inst instanceof MethodInsnNode) {
+            if (oldSuperName.equals(((MethodInsnNode) inst).owner)) {
+                ((MethodInsnNode) inst).owner = superName;
+            }
+            if (oldName.equals(((MethodInsnNode) inst).owner)) {
+                ((MethodInsnNode) inst).owner = name;
+            }
+        } else if (inst instanceof FieldInsnNode) {
+            if (oldSuperName.equals(((FieldInsnNode) inst).owner)) {
+                ((FieldInsnNode) inst).owner = superName;
+            }
+            if (oldName.equals(((FieldInsnNode) inst).owner)) {
+                ((FieldInsnNode) inst).owner = name;
+            }
         }
     }
 
     private static final Type IMapperType = getType(IMapper.class);
     private static final Type SupplierType = getType(Supplier.class);
+    private static final Type SupplierArrayType = getType(Supplier[].class);
     private static final Type ObjectType = getType(Object.class);
+    private static final Type ProcessorType = getType(Processor.class);
+    private static final Type ClassType = getType(Class.class);
     private static final String[] EMPTY_ARRAY = new String[0];
-    protected static Consumer<Class<?>> ctorMapper(Type[] from, Type[] to, int mapperId, Supplier<IMapper> mapperSupplier, ClassNode classNode, MethodNode originalCtor) {
+    protected static void ctorMapper(Type[] from, Type[] to, int mapperId, Supplier<IMapper> mapperSupplier, ClassNode classNode, MethodNode originalCtor, MethodNode clinit) {
         Type mapperSupplierType = getType(mapperSupplier.getClass());
         String fieldname = "_minherit_autogen_ctor_mapper_factory_" + mapperId;
-        FieldNode mapperFactory = new FieldNode(ACC_PUBLIC | ACC_STATIC, fieldname, SupplierType.getDescriptor(), null, null);
+        FieldNode mapperFactory = new FieldNode(ACC_PUBLIC | ACC_STATIC | ACC_FINAL, fieldname, SupplierType.getDescriptor(), null, null);
         classNode.fields.add(mapperFactory);
         //wrint in
         MethodNode adapterIn = new MethodNode(originalCtor.access, "<init>", originalCtor.desc, originalCtor.signature, EMPTY_ARRAY);
@@ -107,7 +152,7 @@ public class Processor {
             Type paramType = fromType.getSort() == OBJECT?ObjectType:fromType;
 
             loadIntConst(adapterIn, i);
-            adapterIn.visitVarInsn(ILOAD, i+1);
+            adapterIn.visitVarInsn(fromType.getOpcode(ILOAD), i+1);
             adapterIn.visitMethodInsn(INVOKEINTERFACE, IMapperType.getInternalName(), mapperIn(paramType), Type.getMethodDescriptor(IMapperType, INT_TYPE, paramType), true);
         }
         adapterIn.visitMethodInsn(INVOKESPECIAL, classNode.name, "<init>", "(Lde/sirati97/minherit/IMapper;)V", false);
@@ -142,7 +187,7 @@ public class Processor {
             Type returnType = toType.getSort() == OBJECT?ObjectType:toType;
             adapterOut.instructions.add(new MethodInsnNode(INVOKEINTERFACE, IMapperType.getInternalName(), mapperOut(returnType), Type.getMethodDescriptor(returnType, INT_TYPE), true));
             if (toType.getSort() == OBJECT) {
-                adapterOut.visitTypeInsn(CHECKCAST, toType.getDescriptor());
+                adapterOut.visitTypeInsn(CHECKCAST, toType.getInternalName());
             }
         }
 
@@ -153,13 +198,48 @@ public class Processor {
 
         classNode.methods.add(adapterOut);
 
-        return (clazz) -> {
+
+
+         iterable = clinit.instructions::iterator;
+        AbstractInsnNode entryPoint = null;
+        for (AbstractInsnNode inst:iterable) {
+            if (inst.getOpcode() == RETURN) {
+                do {
+                    inst = inst.getPrevious();
+                } while (!(inst instanceof LabelNode));
+                entryPoint = inst.getPrevious();
+                if (entryPoint == null) {
+                    entryPoint = new InsnNode(NOP);
+                    clinit.instructions.insert(entryPoint);
+                }
+                break;
+            }
+        }
+
+        MethodNode insertion = new MethodNode(0,"","","", null); //
+        Label l0 = setLineNumber(insertion, Integer.MAX_VALUE);
+        insertion.visitLdcInsn(Type.getObjectType(classNode.name));
+        insertion.visitMethodInsn(INVOKESTATIC, ProcessorType.getInternalName(), "getMapperSupplier", Type.getMethodDescriptor(SupplierArrayType, ClassType), false);
+        insertion.visitVarInsn(ASTORE, 0); //todo this index might create problems
+        //todo find entry point for second access
+        insertion.visitVarInsn(ALOAD, 0);
+        insertion.visitInsn(ICONST_0);
+        insertion.visitInsn(AALOAD);
+        insertion.visitFieldInsn(PUTSTATIC, classNode.name, fieldname, SupplierType.getDescriptor());
+
+        insertion.visitLocalVariable("_minherit_autogen_ctor_mapper_factory_array", SupplierArrayType.getDescriptor(), null, l0, l0, 0);
+        insertion.visitMaxs(0, 0);
+        insertion.visitEnd();
+
+        clinit.instructions.insert(entryPoint, insertion.instructions);
+        
+        /*return (clazz) -> {
             try {
                 clazz.getDeclaredField(fieldname).set(null, mapperSupplier);
             } catch (NoSuchFieldException | IllegalAccessException e) {
                 throw new IllegalStateException(e);
             }
-        };
+        };*/
     }
 
     public static Label setLineNumber(MethodNode mn, int line) {
@@ -228,26 +308,34 @@ public class Processor {
         return in.replace('.', '/');
     }
 
-
-    public static ClassNode getNode(Class<?> clazz) {
+    public static Function<Class<?>, ClassReader> readClass = (clazz) -> {
         try {
-            ClassNode cn = new ClassNode();
-            ClassReader cr = new ClassReader(clazz.getResourceAsStream(clazz.getSimpleName() + ".class"));
-            cr.accept(cn, EXPAND_FRAMES);
-            return cn;
+            return new ClassReader(clazz.getResourceAsStream(clazz.getSimpleName() + ".class"));
         } catch (IOException e) {
             throw new IllegalStateException(e);
         }
+    };
+
+    public static ClassNode getNode(Class<?> clazz) {
+        ClassNode cn = new ClassNode();
+        ClassReader cr = readClass.apply(clazz);
+        cr.accept(cn, EXPAND_FRAMES);
+        return cn;
     }
 
 
-    public static Class<?> loadClass(byte[] bytecode) throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
-        ClassLoader scl = ClassLoader.getSystemClassLoader();
+    public static Class<?> loadClass(byte[] bytecode, String name, ClassLoader classLoader)  throws NoSuchMethodException, InvocationTargetException, IllegalAccessException, ClassNotFoundException {
+        //MethodHandles.publicLookup().in(implClass);
+
+
         Object[] args = new Object[] {
                 null, bytecode, 0, bytecode.length
         };
         Method m = ClassLoader.class.getDeclaredMethod("defineClass", String.class, byte[].class, int.class, int.class);
         m.setAccessible(true);
-        return (Class<?>) m.invoke(scl, args);
+        return (Class<?>) m.invoke(classLoader, args);/**/
+        /*ByteClassLoader byteClassLoader = classloaders.computeIfAbsent(classLoader, classLoader1 -> new ByteClassLoader(classLoader));
+        return byteClassLoader.loadClass(name, bytecode);/**/
     }
+
 }

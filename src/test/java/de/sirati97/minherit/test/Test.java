@@ -16,9 +16,10 @@ public class Test {
 
 
         Class<Interface> unifiedClass = Processor.unify(Interface.class, Parent.class, Impl.class, MapperTestImpl::new);
-        Interface i = unifiedClass.getConstructor(int.class, boolean.class).newInstance(143, false);
+        Interface i = unifiedClass.getConstructor(int.class, boolean.class, String.class).newInstance(143, false, "HelloTransformation");
 
 
         i.foo();
+        System.out.println(i.getBase());
     }
 }

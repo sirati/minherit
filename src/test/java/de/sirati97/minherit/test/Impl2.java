@@ -5,14 +5,12 @@ import de.sirati97.minherit.IMapper;
 
 import java.util.function.Supplier;
 
-public abstract class Impl extends Base implements Interface {
+public abstract class Impl2 extends Base implements Interface {
     public static Supplier<IMapper> mapperCtor1;// = MapperTestImpl::new;
-    private String base;
 
-    public Impl(int num, boolean human, String base) {
+    public Impl2(int num, boolean human) {
         super(null); //this line is going to get omitted
         System.out.println("Impl got " + num + "&" + human);
-        this.base = base;
     }
 
     @Override
@@ -22,10 +20,6 @@ public abstract class Impl extends Base implements Interface {
         super.foo();
     }
 
-    @Override
-    public String getBase() {
-        return base;
-    }
 
     static {
         int i = 1;
